@@ -38,6 +38,15 @@ def check():
     assert client.delete(f"/tasks/{new_id}").status_code == 404
     assert len(client.get("/tasks").json()) == 3
 
+    # extras
+    assert [t["id"] for t in client.get("/tasks?done=true").json()] == [1]
+    assert [t["id"] for t in client.get("/tasks?search=GITHUB").json()] == [3]
+    assert [t["id"] for t in client.get("/tasks?limit=2&offset=1").json()] == [2, 3]
+    assert client.get("/stats").json() == {"total": 3, "done": 1, "open": 2}
+    client.delete("/tasks/1")
+    assert len(client.post("/reset").json()) == 3
+    assert client.get("/tasks/1").status_code == 200
+
     print("all checks passed")
 
 

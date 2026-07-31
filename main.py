@@ -11,12 +11,14 @@ app = FastAPI(
     "everything resets when the server restarts.",
 )
 
-# The "database": a plain list that lives only while the process runs.
-tasks = [
+SEED = [
     {"id": 1, "title": "Read the assignment", "done": True},
     {"id": 2, "title": "Build the CRUD API", "done": False},
     {"id": 3, "title": "Push to GitHub", "done": False},
 ]
+
+# The "database": a plain list that lives only while the process runs.
+tasks = [dict(task) for task in SEED]
 
 
 class Task(BaseModel):
@@ -106,9 +108,23 @@ def health():
 
 
 @app.get("/tasks", response_model=list[Task], tags=["tasks"])
-def list_tasks():
-    """List every task."""
-    return tasks
+def list_tasks(
+    done: bool | None = None,
+    search: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+):
+    """List tasks. Optionally filter by done, search titles, and paginate."""
+    result = tasks
+    if done is not None:
+        result = [task for task in result if task["done"] == done]
+    if search:
+        needle = search.lower()
+        result = [task for task in result if needle in task["title"].lower()]
+    result = result[offset:]
+    if limit is not None:
+        result = result[:limit]
+    return result
 
 
 @app.get("/tasks/{task_id}", response_model=Task, tags=["tasks"], responses=NOT_FOUND)
@@ -169,3 +185,17 @@ def delete_task(task_id: int):
         return not_found(task_id)
     tasks.remove(task)
     return Response(status_code=204)
+
+
+@app.get("/stats", tags=["extras"])
+def stats():
+    """Counts, computed on the fly instead of stored."""
+    done = sum(1 for task in tasks if task["done"])
+    return {"total": len(tasks), "done": done, "open": len(tasks) - done}
+
+
+@app.post("/reset", tags=["extras"])
+def reset():
+    """Throw away everything and put the three example tasks back."""
+    tasks[:] = [dict(task) for task in SEED]
+    return tasks
