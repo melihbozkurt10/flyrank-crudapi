@@ -1,9 +1,15 @@
 from fastapi import FastAPI, Response
 from fastapi.exceptions import RequestValidationError
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-app = FastAPI()
+app = FastAPI(
+    title="Task API",
+    version="1.0",
+    description="A to-do list CRUD API. Storage is a list in memory, so "
+    "everything resets when the server restarts.",
+)
 
 # The "database": a plain list that lives only while the process runs.
 tasks = [
@@ -11,6 +17,14 @@ tasks = [
     {"id": 2, "title": "Build the CRUD API", "done": False},
     {"id": 3, "title": "Push to GitHub", "done": False},
 ]
+
+
+class Task(BaseModel):
+    """A single to-do item."""
+
+    id: int
+    title: str
+    done: bool
 
 
 class TaskIn(BaseModel):
@@ -24,6 +38,17 @@ class TaskUpdate(BaseModel):
 
     title: str | None = None
     done: bool | None = None
+
+
+class Error(BaseModel):
+    """Every error this API returns looks like this."""
+
+    error: str
+
+
+# Extra responses so Swagger UI documents the failure cases, not just the happy path.
+NOT_FOUND = {404: {"model": Error, "description": "No task with that id"}}
+BAD_REQUEST = {400: {"model": Error, "description": "Missing or empty title"}}
 
 
 def find_task(task_id: int):
@@ -50,6 +75,24 @@ def on_validation_error(request, exc: RequestValidationError):
     return bad_request(f"{field}: {first['msg']}")
 
 
+def custom_openapi():
+    """Drop FastAPI's automatic 422 entries: this API answers 400 instead."""
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    for operations in schema["paths"].values():
+        for operation in operations.values():
+            operation["responses"].pop("422", None)
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = custom_openapi
+
+
 @app.get("/")
 def root():
     """What this API is and where to go next."""
@@ -62,13 +105,13 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/tasks")
+@app.get("/tasks", response_model=list[Task], tags=["tasks"])
 def list_tasks():
     """List every task."""
     return tasks
 
 
-@app.get("/tasks/{task_id}")
+@app.get("/tasks/{task_id}", response_model=Task, tags=["tasks"], responses=NOT_FOUND)
 def get_task(task_id: int):
     """Get one task by id. 404 if no task has that id."""
     task = find_task(task_id)
@@ -77,7 +120,13 @@ def get_task(task_id: int):
     return task
 
 
-@app.post("/tasks", status_code=201)
+@app.post(
+    "/tasks",
+    status_code=201,
+    response_model=Task,
+    tags=["tasks"],
+    responses=BAD_REQUEST,
+)
 def create_task(payload: TaskIn):
     """Create a task. Empty or missing title is a 400."""
     title = payload.title.strip()
@@ -89,7 +138,12 @@ def create_task(payload: TaskIn):
     return task
 
 
-@app.put("/tasks/{task_id}")
+@app.put(
+    "/tasks/{task_id}",
+    response_model=Task,
+    tags=["tasks"],
+    responses=BAD_REQUEST | NOT_FOUND,
+)
 def update_task(task_id: int, payload: TaskUpdate):
     """Update a task's title and/or done. 404 unknown id, 400 empty body."""
     task = find_task(task_id)
@@ -107,7 +161,7 @@ def update_task(task_id: int, payload: TaskUpdate):
     return task
 
 
-@app.delete("/tasks/{task_id}", status_code=204)
+@app.delete("/tasks/{task_id}", status_code=204, tags=["tasks"], responses=NOT_FOUND)
 def delete_task(task_id: int):
     """Delete a task. 204 with no body on success, 404 on unknown id."""
     task = find_task(task_id)
