@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -17,6 +17,13 @@ class TaskIn(BaseModel):
     """Body of POST /tasks."""
 
     title: str
+
+
+class TaskUpdate(BaseModel):
+    """Body of PUT /tasks/{task_id}. Send title, done, or both."""
+
+    title: str | None = None
+    done: bool | None = None
 
 
 def find_task(task_id: int):
@@ -80,3 +87,31 @@ def create_task(payload: TaskIn):
     task = {"id": next_id, "title": title, "done": False}
     tasks.append(task)
     return task
+
+
+@app.put("/tasks/{task_id}")
+def update_task(task_id: int, payload: TaskUpdate):
+    """Update a task's title and/or done. 404 unknown id, 400 empty body."""
+    task = find_task(task_id)
+    if task is None:
+        return not_found(task_id)
+    if payload.title is None and payload.done is None:
+        return bad_request("body must contain title and/or done")
+    if payload.title is not None:
+        title = payload.title.strip()
+        if not title:
+            return bad_request("title must not be empty")
+        task["title"] = title
+    if payload.done is not None:
+        task["done"] = payload.done
+    return task
+
+
+@app.delete("/tasks/{task_id}", status_code=204)
+def delete_task(task_id: int):
+    """Delete a task. 204 with no body on success, 404 on unknown id."""
+    task = find_task(task_id)
+    if task is None:
+        return not_found(task_id)
+    tasks.remove(task)
+    return Response(status_code=204)
