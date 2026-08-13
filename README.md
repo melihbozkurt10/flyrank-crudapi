@@ -1,79 +1,89 @@
-# Task API — W3/A1
+# Task API — Postgres in Docker
 
-A small CRUD API for a to-do list, built with **Python + FastAPI**. Tasks are
-stored in **SQLite** (`tasks.db`), so they survive a server restart.
+A to-do CRUD API. The URLs, bodies, and status codes are the same as
+Assignment 1 and 2. Storage is a `TaskRepository`. With `DATABASE_URL` it
+talks to Postgres; without it, an in-memory list. Switching storage is one
+function in `main.py` (`build_repo`). Routes still validate input and map
+404/400 — they do not contain SQL.
 
-The URLs, request bodies, and responses are the same as Assignment 1.
-Only the storage layer changed: `Client -> API -> SQLite` instead of
-`Client -> API -> list in memory`.
+Honest note: Assignment 2 had SQL inside the route handlers (SQLite). Those
+handlers now call `repo.list` / `repo.create` / … instead. The HTTP contract
+did not change. The database did.
 
-## Why SQLite
+```
+Client -> API (main.py) -> TaskRepository -> Postgres  (docker compose)
+                         -> in-memory list  (python check.py)
+```
 
-SQLite is a full SQL database in a single file. There is no separate database
-server to install or run. Python already includes the `sqlite3` module, so
-`pip install -r requirements.txt` is enough.
+## Why this stack
 
-That makes it a good first database: you get real SQL (`SELECT`, `INSERT`,
-`UPDATE`, `DELETE`) without operating a Postgres or MySQL process. Moving to
-one of those later is mostly a connection-string change — the API stays put.
+Postgres is a real database server. SQLite was a file on disk; this is a
+process you connect to with a connection string. Docker runs that process
+for you, with a volume so the data outlives the container.
 
-## Where the database lives
+`.env` holds the connection string and is gitignored. `.env.example` is
+committed so a clone knows which variables to set.
 
-| | |
-| --- | --- |
-| File | `tasks.db` in the project root (next to `main.py`) |
-| Table | `tasks` (`id`, `title`, `done`) |
-| Created | Automatically on first start (`CREATE TABLE IF NOT EXISTS`) |
-| Seeded | Three example tasks, **only if the table is empty** |
+## Start the whole stack
 
-`tasks.db` is gitignored. A clone creates a fresh file the first time the app
-runs. Restarting does **not** re-insert the examples.
+Needs [Docker Desktop](https://www.docker.com/products/docker-desktop/).
 
-Override the path with `TASKS_DB` if you need a different file (the self-check
-uses this so it never touches your real data).
+```bash
+copy .env.example .env          # Windows;  cp .env.example .env on macOS/Linux
+docker compose up --build
+```
 
-## Install & run
+- API: <http://localhost:8000>
+- Swagger: <http://localhost:8000/docs>
+- Postgres: `localhost:5432` (user/password/db: `tasks`)
+
+First boot runs `db/init.sql`: creates `tasks` and inserts three example rows
+only if the table is empty. Later boots skip that script (the volume already
+exists) and keep your data.
+
+Stop with Ctrl-C, or `docker compose down`. `down -v` deletes the volume and
+the data.
+
+## Persistence check
+
+This is how it was verified conceptually; run it after `docker compose up`:
+
+```bash
+curl -s -X POST http://localhost:8000/tasks -H "Content-Type: application/json" -d "{\"title\":\"Will I survive a restart?\"}"
+curl -s http://localhost:8000/tasks
+
+docker compose restart
+
+curl -s http://localhost:8000/tasks
+```
+
+The new task is still there after both the app container and the database
+container restart. It lives on the `pgdata` volume, not in the API process.
+
+Without Docker, `python check.py` uses the in-memory repository and cannot
+prove this — that is expected.
+
+## Without Docker (self-check only)
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate          # Windows;  source .venv/bin/activate on macOS/Linux
+.venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --reload
-```
-
-Server: <http://localhost:8000> · Swagger UI: <http://localhost:8000/docs>
-
-The first request (or the import of `main`) creates `tasks.db` if it is missing.
-
-Run the self-check (exercises the whole CRUD cycle against a temporary database):
-
-```bash
 python check.py     # prints "all checks passed"
 ```
 
-## Database viewer
+`check.py` sets `DATABASE_URL` empty so it never touches Postgres.
 
-Opened `tasks.db` and ran `SELECT * FROM tasks;`:
+## Files that matter
 
-![SQLite viewer showing the tasks table](docs/sqlite-viewer.png)
-
-Example query executed:
-
-```sql
-SELECT * FROM tasks WHERE done = 1;
-```
-
-That returns only the completed row (`Read the assignment`). Other queries run
-against the same file:
-
-```sql
-SELECT COUNT(*) FROM tasks;
-UPDATE tasks SET done = 1;
-DELETE FROM tasks WHERE done = 1;
-```
-
-Edits made in a SQLite viewer show up immediately on `GET /tasks` — the API
-reads the file, it does not keep its own copy.
+| File | Role |
+| --- | --- |
+| `main.py` | Routes + `build_repo()` (the swap) |
+| `repository.py` | `InMemoryRepository` and `PostgresRepository` — same methods |
+| `db/init.sql` | `CREATE TABLE` + seed (mounted into Postgres on first boot) |
+| `.env` | Secrets / connection string (not in git) |
+| `.env.example` | Same keys, dummy values |
+| `docker-compose.yml` | `app` + `db` + named volume `pgdata` |
 
 ## Endpoints
 
@@ -89,40 +99,12 @@ reads the file, it does not keep its own copy.
 
 Every error returns JSON in the same shape: `{"error": "Task 99 not found"}`.
 
-### Extras (now SQL)
-
-| Method | Path                        | Does                                     |
-| ------ | --------------------------- | ---------------------------------------- |
-| GET    | `/tasks?done=true`          | `WHERE done = 1`                         |
-| GET    | `/tasks?search=milk`        | `WHERE title LIKE '%milk%'`              |
-| GET    | `/tasks?limit=2&offset=1`   | `LIMIT` / `OFFSET`                       |
-| GET    | `/stats`                    | `COUNT(*)` and `SUM(done)`               |
-| POST   | `/reset`                    | Restore the three example tasks          |
-
-Filters combine: `/tasks?done=false&search=api&limit=1`.
-
-## Persistence experiment
-
-Created a task, stopped the process, started it again:
-
-```console
-$ curl -s -X POST http://localhost:8000/tasks -H "Content-Type: application/json" -d '{"title":"Will I survive a restart?"}'
-{"id":4,"title":"Will I survive a restart?","done":false}
-
-# Ctrl-C, then uvicorn main:app again
-
-$ curl -s http://localhost:8000/tasks
-[{"id":1,"title":"Read the assignment","done":true},{"id":2,"title":"Build the CRUD API","done":false},{"id":3,"title":"Push to GitHub","done":false},{"id":4,"title":"Will I survive a restart?","done":false}]
-```
-
-The new task is still there. Last week it vanished with the process; now it
-lives in `tasks.db`.
-
-## Swagger UI
-
-FastAPI still generates `/docs` from the code. Storage changing does not change
-the documented API.
+| Method | Path                        | Does                          |
+| ------ | --------------------------- | ----------------------------- |
+| GET    | `/tasks?done=true`          | Filter                        |
+| GET    | `/tasks?search=milk`        | Case-insensitive title search |
+| GET    | `/tasks?limit=2&offset=1`   | Pagination                    |
+| GET    | `/stats`                    | `{total, done, open}`         |
+| POST   | `/reset`                    | Restore the three examples    |
 
 ![Swagger UI listing every endpoint](docs/swagger-ui.png)
-
-A bad request body still returns `400 Bad Request` (not FastAPI's default 422).

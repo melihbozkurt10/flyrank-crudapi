@@ -1,0 +1,9 @@
+.venv
+.git
+.playwright-mcp
+__pycache__
+*.pyc
+*.db
+.env
+docs
+*.pdf

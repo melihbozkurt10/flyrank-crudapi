@@ -1,3 +1,5 @@
 fastapi
 uvicorn[standard]
 httpx  # only needed by check.py (fastapi.testclient)
+python-dotenv
+psycopg[binary]
