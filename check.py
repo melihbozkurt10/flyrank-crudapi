@@ -1,10 +1,27 @@
 """Self-check: runs the whole CRUD cycle in-process. `python check.py`"""
 
+import os
+import sqlite3
+
+# Isolate from the real tasks.db so this file never wipes student data.
+_DB = os.path.join(os.path.dirname(__file__), "check-tasks.db")
+if os.path.exists(_DB):
+    os.remove(_DB)
+os.environ["TASKS_DB"] = _DB
+
 from fastapi.testclient import TestClient
 
-from main import app
+from main import app, init_db
 
 client = TestClient(app)
+
+
+def rows_in_file():
+    conn = sqlite3.connect(_DB)
+    try:
+        return conn.execute("SELECT id, title, done FROM tasks ORDER BY id").fetchall()
+    finally:
+        conn.close()
 
 
 def check():
@@ -17,7 +34,12 @@ def check():
     r = client.get("/tasks/99")
     assert r.status_code == 404 and r.json() == {"error": "Task 99 not found"}
 
-    # create
+    # seed only if empty — running init again must not duplicate the examples
+    init_db()
+    init_db()
+    assert len(client.get("/tasks").json()) == 3
+
+    # create — and prove the row is in the sqlite file, not just RAM
     r = client.post("/tasks", json={"title": "Buy milk"})
     assert r.status_code == 201, r.status_code
     new_id = r.json()["id"]
@@ -25,6 +47,7 @@ def check():
     assert client.post("/tasks", json={}).status_code == 400
     assert client.post("/tasks", json={"title": "  "}).status_code == 400
     assert len(client.get("/tasks").json()) == 4
+    assert (new_id, "Buy milk", 0) in rows_in_file()
 
     # update
     r = client.put(f"/tasks/{new_id}", json={"done": True})

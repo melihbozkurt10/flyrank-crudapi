@@ -1,14 +1,14 @@
+import os
+import sqlite3
+
 from fastapi import FastAPI, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-app = FastAPI(
-    title="Task API",
-    version="1.0",
-    description="A to-do list CRUD API. Storage is a list in memory, so "
-    "everything resets when the server restarts.",
+DB_PATH = os.environ.get(
+    "TASKS_DB", os.path.join(os.path.dirname(__file__), "tasks.db")
 )
 
 SEED = [
@@ -17,8 +17,49 @@ SEED = [
     {"id": 3, "title": "Push to GitHub", "done": False},
 ]
 
-# The "database": a plain list that lives only while the process runs.
-tasks = [dict(task) for task in SEED]
+
+def connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+db = connect()
+
+
+def init_db() -> None:
+    """Create the tasks table if needed; seed three examples only when empty."""
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            done INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    count = db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    if count == 0:
+        db.executemany(
+            "INSERT INTO tasks (id, title, done) VALUES (?, ?, ?)",
+            [(task["id"], task["title"], int(task["done"])) for task in SEED],
+        )
+    db.commit()
+
+
+init_db()
+
+
+def task_from_row(row: sqlite3.Row) -> dict:
+    return {"id": row["id"], "title": row["title"], "done": bool(row["done"])}
+
+
+app = FastAPI(
+    title="Task API",
+    version="1.0",
+    description="A to-do list CRUD API. Tasks live in a SQLite file (tasks.db), "
+    "so they survive a server restart.",
+)
 
 
 class Task(BaseModel):
@@ -53,12 +94,8 @@ NOT_FOUND = {404: {"model": Error, "description": "No task with that id"}}
 BAD_REQUEST = {400: {"model": Error, "description": "Missing or empty title"}}
 
 
-def find_task(task_id: int):
-    """Return the task dict with this id, or None."""
-    for task in tasks:
-        if task["id"] == task_id:
-            return task
-    return None
+def get_task_row(task_id: int) -> sqlite3.Row | None:
+    return db.execute("SELECT id, title, done FROM tasks WHERE id = ?", (task_id,)).fetchone()
 
 
 def not_found(task_id: int):
@@ -115,25 +152,31 @@ def list_tasks(
     offset: int = 0,
 ):
     """List tasks. Optionally filter by done, search titles, and paginate."""
-    result = tasks
+    sql = "SELECT id, title, done FROM tasks WHERE 1=1"
+    params: list = []
     if done is not None:
-        result = [task for task in result if task["done"] == done]
+        sql += " AND done = ?"
+        params.append(int(done))
     if search:
-        needle = search.lower()
-        result = [task for task in result if needle in task["title"].lower()]
-    result = result[offset:]
+        sql += " AND title LIKE ?"
+        params.append(f"%{search}%")
+    sql += " ORDER BY id"
     if limit is not None:
-        result = result[:limit]
-    return result
+        sql += " LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+    elif offset:
+        sql += " LIMIT -1 OFFSET ?"
+        params.append(offset)
+    return [task_from_row(row) for row in db.execute(sql, params)]
 
 
 @app.get("/tasks/{task_id}", response_model=Task, tags=["tasks"], responses=NOT_FOUND)
 def get_task(task_id: int):
     """Get one task by id. 404 if no task has that id."""
-    task = find_task(task_id)
-    if task is None:
+    row = get_task_row(task_id)
+    if row is None:
         return not_found(task_id)
-    return task
+    return task_from_row(row)
 
 
 @app.post(
@@ -148,10 +191,9 @@ def create_task(payload: TaskIn):
     title = payload.title.strip()
     if not title:
         return bad_request("title must not be empty")
-    next_id = max((task["id"] for task in tasks), default=0) + 1
-    task = {"id": next_id, "title": title, "done": False}
-    tasks.append(task)
-    return task
+    cur = db.execute("INSERT INTO tasks (title, done) VALUES (?, 0)", (title,))
+    db.commit()
+    return {"id": cur.lastrowid, "title": title, "done": False}
 
 
 @app.put(
@@ -162,40 +204,55 @@ def create_task(payload: TaskIn):
 )
 def update_task(task_id: int, payload: TaskUpdate):
     """Update a task's title and/or done. 404 unknown id, 400 empty body."""
-    task = find_task(task_id)
-    if task is None:
+    row = get_task_row(task_id)
+    if row is None:
         return not_found(task_id)
     if payload.title is None and payload.done is None:
         return bad_request("body must contain title and/or done")
+    title = row["title"]
+    done = row["done"]
     if payload.title is not None:
         title = payload.title.strip()
         if not title:
             return bad_request("title must not be empty")
-        task["title"] = title
     if payload.done is not None:
-        task["done"] = payload.done
-    return task
+        done = int(payload.done)
+    db.execute(
+        "UPDATE tasks SET title = ?, done = ? WHERE id = ?",
+        (title, done, task_id),
+    )
+    db.commit()
+    return {"id": task_id, "title": title, "done": bool(done)}
 
 
 @app.delete("/tasks/{task_id}", status_code=204, tags=["tasks"], responses=NOT_FOUND)
 def delete_task(task_id: int):
     """Delete a task. 204 with no body on success, 404 on unknown id."""
-    task = find_task(task_id)
-    if task is None:
+    cur = db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    db.commit()
+    if cur.rowcount == 0:
         return not_found(task_id)
-    tasks.remove(task)
     return Response(status_code=204)
 
 
 @app.get("/stats", tags=["extras"])
 def stats():
-    """Counts, computed on the fly instead of stored."""
-    done = sum(1 for task in tasks if task["done"])
-    return {"total": len(tasks), "done": done, "open": len(tasks) - done}
+    """Counts from SQL, not from a list in memory."""
+    row = db.execute(
+        "SELECT COUNT(*) AS total, COALESCE(SUM(done), 0) AS done FROM tasks"
+    ).fetchone()
+    total = row["total"]
+    done = row["done"]
+    return {"total": total, "done": done, "open": total - done}
 
 
 @app.post("/reset", tags=["extras"])
 def reset():
     """Throw away everything and put the three example tasks back."""
-    tasks[:] = [dict(task) for task in SEED]
-    return tasks
+    db.execute("DELETE FROM tasks")
+    db.executemany(
+        "INSERT INTO tasks (id, title, done) VALUES (?, ?, ?)",
+        [(task["id"], task["title"], int(task["done"])) for task in SEED],
+    )
+    db.commit()
+    return list(SEED)
