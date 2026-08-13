@@ -57,6 +57,22 @@ def check():
     assert len(client.post("/reset").json()) == 3
     assert client.get("/tasks/1").status_code == 200
 
+    # auth gates (no Supabase needed for these)
+    assert client.get("/public/info").json() == {
+        "message": "Welcome stranger! This info is public."
+    }
+    r = client.get("/protected/profile")
+    assert r.status_code == 401 and r.json() == {"error": "Access token required"}
+    r = client.get("/protected/dashboard")
+    assert r.status_code == 401 and r.json() == {"error": "Access token required"}
+    r = client.get("/protected/profile", headers={"Authorization": "Bearer not-a-jwt"})
+    assert r.status_code == 401 and r.json() == {"error": "Invalid or expired token"}
+    r = client.post("/auth/logout")
+    assert r.status_code == 401 and r.json() == {"error": "Access token required"}
+    assert client.post("/auth/signup", json={}).status_code == 400
+    assert client.post("/auth/login", json={"email": "", "password": ""}).status_code == 400
+    assert client.post("/auth/login", json={"email": "a@b.c", "password": "wrong"}).status_code == 401
+
     print("all checks passed")
 
 

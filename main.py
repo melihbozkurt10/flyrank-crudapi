@@ -1,15 +1,17 @@
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Response
+
+load_dotenv()
+
+from fastapi import Depends, FastAPI, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from auth import AuthError, AuthIn, public_user, require_user, sign_out_token, supabase
 from repository import InMemoryRepository, PostgresRepository, TaskRepository
-
-load_dotenv()
 
 
 def build_repo() -> TaskRepository:
@@ -26,8 +28,8 @@ repo.init()
 app = FastAPI(
     title="Task API",
     version="1.0",
-    description="A to-do list CRUD API. Storage is a TaskRepository — Postgres "
-    "when DATABASE_URL is set, otherwise an in-memory list.",
+    description="A to-do list CRUD API with Supabase Auth. "
+    "Protected routes expect Authorization: Bearer <access_token>.",
 )
 
 
@@ -63,12 +65,20 @@ NOT_FOUND = {404: {"model": Error, "description": "No task with that id"}}
 BAD_REQUEST = {400: {"model": Error, "description": "Missing or empty title"}}
 
 
+UNAUTHORIZED = {401: {"model": Error, "description": "Missing or invalid token"}}
+
+
 def not_found(task_id: int):
     return JSONResponse(status_code=404, content={"error": f"Task {task_id} not found"})
 
 
 def bad_request(message: str):
     return JSONResponse(status_code=400, content={"error": message})
+
+
+@app.exception_handler(AuthError)
+def on_auth_error(request, exc: AuthError):
+    return JSONResponse(status_code=exc.status_code, content={"error": exc.error})
 
 
 @app.exception_handler(RequestValidationError)
@@ -90,6 +100,7 @@ def custom_openapi():
     for operations in schema["paths"].values():
         for operation in operations.values():
             operation["responses"].pop("422", None)
+            operation["responses"].pop("403", None)
     app.openapi_schema = schema
     return schema
 
@@ -100,13 +111,126 @@ app.openapi = custom_openapi
 @app.get("/")
 def root():
     """What this API is and where to go next."""
-    return {"name": "Task API", "version": "1.0", "endpoints": ["/tasks"]}
+    return {
+        "name": "Task API",
+        "version": "1.0",
+        "endpoints": ["/tasks", "/auth/signup", "/auth/login", "/protected/profile"],
+    }
 
 
 @app.get("/health")
 def health():
     """Liveness check. Returns ok as long as the server answers."""
     return {"status": "ok"}
+
+
+@app.post(
+    "/auth/signup",
+    status_code=201,
+    tags=["auth"],
+    responses=BAD_REQUEST,
+)
+def signup(payload: AuthIn):
+    """Create a user in Supabase Auth."""
+    email = payload.email.strip()
+    password = payload.password
+    if not email or not password:
+        return bad_request("email and password are required")
+    if supabase is None:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Supabase is not configured"},
+        )
+    try:
+        result = supabase.auth.sign_up({"email": email, "password": password})
+    except Exception as exc:
+        return bad_request(str(exc))
+    user = getattr(result, "user", None)
+    if user is None:
+        return bad_request("could not create user")
+    return {
+        "id": user.id,
+        "email": user.email,
+        "created_at": str(user.created_at) if user.created_at else None,
+    }
+
+
+@app.post(
+    "/auth/login",
+    tags=["auth"],
+    responses=BAD_REQUEST | UNAUTHORIZED,
+)
+def login(payload: AuthIn):
+    """Authenticate with Supabase and return JWT access + refresh tokens."""
+    email = payload.email.strip()
+    password = payload.password
+    if not email or not password:
+        return bad_request("email and password are required")
+    if supabase is None:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid login credentials"},
+        )
+    try:
+        result = supabase.auth.sign_in_with_password(
+            {"email": email, "password": password}
+        )
+    except Exception:
+        return JSONResponse(
+            status_code=401, content={"error": "Invalid login credentials"}
+        )
+    session = getattr(result, "session", None)
+    if session is None or not session.access_token:
+        return JSONResponse(
+            status_code=401, content={"error": "Invalid login credentials"}
+        )
+    return {
+        "access_token": session.access_token,
+        "refresh_token": session.refresh_token,
+        "token_type": "bearer",
+        "expires_in": session.expires_in,
+    }
+
+
+@app.post(
+    "/auth/logout",
+    status_code=204,
+    tags=["auth"],
+    responses=UNAUTHORIZED,
+)
+def logout(user: dict = Depends(require_user)):
+    """Invalidate the current session. Requires a valid Bearer token."""
+    try:
+        sign_out_token(user["access_token"])
+    except Exception:
+        pass
+    return Response(status_code=204)
+
+
+@app.get("/public/info", tags=["public"])
+def public_info():
+    """No authentication required."""
+    return {"message": "Welcome stranger! This info is public."}
+
+
+@app.get(
+    "/protected/profile",
+    tags=["protected"],
+    responses=UNAUTHORIZED,
+)
+def profile(user: dict = Depends(require_user)):
+    """Private profile. Authorization: Bearer <access_token>."""
+    return public_user(user)
+
+
+@app.get(
+    "/protected/dashboard",
+    tags=["protected"],
+    responses=UNAUTHORIZED,
+)
+def dashboard(user: dict = Depends(require_user)):
+    """Second protected door — same auth dependency as /protected/profile."""
+    return {"message": "Welcome to your dashboard", "email": user["email"]}
 
 
 @app.get("/tasks", response_model=list[Task], tags=["tasks"])

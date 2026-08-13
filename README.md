@@ -1,110 +1,101 @@
-# Task API — Postgres in Docker
+# Task API — Auth + Postgres
 
-A to-do CRUD API. The URLs, bodies, and status codes are the same as
-Assignment 1 and 2. Storage is a `TaskRepository`. With `DATABASE_URL` it
-talks to Postgres; without it, an in-memory list. Switching storage is one
-function in `main.py` (`build_repo`). Routes still validate input and map
-404/400 — they do not contain SQL.
+A to-do CRUD API with **Supabase Auth**. Anyone can hit `/public/info` and the
+task list. `/protected/*` and `/auth/logout` require
+`Authorization: Bearer <access_token>`.
 
-Honest note: Assignment 2 had SQL inside the route handlers (SQLite). Those
-handlers now call `repo.list` / `repo.create` / … instead. The HTTP contract
-did not change. The database did.
+Passwords never land in this server. The client talks to Supabase; this API
+only checks the JWT Supabase issued.
 
 ```
-Client -> API (main.py) -> TaskRepository -> Postgres  (docker compose)
-                         -> in-memory list  (python check.py)
+Client -> POST /auth/login -> Supabase -> JWT
+Client -> GET /protected/profile + Bearer JWT -> this API -> supabase.auth.get_user
 ```
 
-## Why this stack
+`.env` is gitignored. Copy `.env.example` and paste your own Supabase URL and
+anon key. Never commit those values.
 
-Postgres is a real database server. SQLite was a file on disk; this is a
-process you connect to with a connection string. Docker runs that process
-for you, with a volume so the data outlives the container.
+## Setup
 
-`.env` holds the connection string and is gitignored. `.env.example` is
-committed so a clone knows which variables to set.
-
-## Start the whole stack
-
-Needs [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+1. Create a free project at [supabase.com](https://supabase.com).
+2. **Authentication → Providers → Email**: turn **off** "Confirm email" so
+   `POST /auth/login` works immediately after signup (otherwise the mailbox
+   has to confirm first).
+3. **Project Settings → API**: copy Project URL and `anon` `public` key.
 
 ```bash
 copy .env.example .env          # Windows;  cp .env.example .env on macOS/Linux
-docker compose up --build
 ```
 
-- API: <http://localhost:8000>
-- Swagger: <http://localhost:8000/docs>
-- Postgres: `localhost:5432` (user/password/db: `tasks`)
+Fill in:
 
-First boot runs `db/init.sql`: creates `tasks` and inserts three example rows
-only if the table is empty. Later boots skip that script (the volume already
-exists) and keep your data.
-
-Stop with Ctrl-C, or `docker compose down`. `down -v` deletes the volume and
-the data.
-
-## Persistence check
-
-This is how it was verified conceptually; run it after `docker compose up`:
-
-```bash
-curl -s -X POST http://localhost:8000/tasks -H "Content-Type: application/json" -d "{\"title\":\"Will I survive a restart?\"}"
-curl -s http://localhost:8000/tasks
-
-docker compose restart
-
-curl -s http://localhost:8000/tasks
 ```
-
-The new task is still there after both the app container and the database
-container restart. It lives on the `pgdata` volume, not in the API process.
-
-Without Docker, `python check.py` uses the in-memory repository and cannot
-prove this — that is expected.
-
-## Without Docker (self-check only)
+SUPABASE_URL=https://xxxx.supabase.co
+SUPABASE_KEY=eyJ...
+```
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
+```
+
+The terminal should print `Server running and connected to Supabase`.
+
+- API: <http://localhost:8000>
+- Swagger: <http://localhost:8000/docs> — click **Authorize**, paste the
+  `access_token` from `/auth/login`, then Try it out on `/protected/profile`.
+
+```bash
 python check.py     # prints "all checks passed"
 ```
 
-`check.py` sets `DATABASE_URL` empty so it never touches Postgres.
+### Auth smoke test
 
-## Files that matter
+```bash
+curl -i -X POST http://localhost:8000/auth/signup -H "Content-Type: application/json" -d "{\"email\":\"test@example.com\",\"password\":\"password123\"}"
 
-| File | Role |
-| --- | --- |
-| `main.py` | Routes + `build_repo()` (the swap) |
-| `repository.py` | `InMemoryRepository` and `PostgresRepository` — same methods |
-| `db/init.sql` | `CREATE TABLE` + seed (mounted into Postgres on first boot) |
-| `.env` | Secrets / connection string (not in git) |
-| `.env.example` | Same keys, dummy values |
-| `docker-compose.yml` | `app` + `db` + named volume `pgdata` |
+curl -s -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"email\":\"test@example.com\",\"password\":\"password123\"}"
 
-## Endpoints
+curl -i http://localhost:8000/public/info
+curl -i http://localhost:8000/protected/profile
+curl -i http://localhost:8000/protected/profile -H "Authorization: Bearer PASTE_ACCESS_TOKEN"
+```
 
-| Method | Path              | Does                     | Success | Errors |
-| ------ | ----------------- | ------------------------ | ------- | ------ |
-| GET    | `/`               | What this API is         | 200     | —      |
-| GET    | `/health`         | Liveness check           | 200     | —      |
-| GET    | `/tasks`          | List all tasks           | 200     | —      |
-| GET    | `/tasks/{id}`     | Get one task             | 200     | 404    |
-| POST   | `/tasks`          | Create a task            | 201     | 400    |
-| PUT    | `/tasks/{id}`     | Update title and/or done | 200     | 400, 404 |
-| DELETE | `/tasks/{id}`     | Delete a task            | 204     | 404    |
+## API reference
 
-Every error returns JSON in the same shape: `{"error": "Task 99 not found"}`.
+| Method | Path | Auth | Success | Errors |
+| ------ | ---- | ---- | ------- | ------ |
+| POST | `/auth/signup` | no | 201 | 400 |
+| POST | `/auth/login` | no | 200 (`access_token`, `refresh_token`) | 400, 401 |
+| POST | `/auth/logout` | Bearer | 204 | 401 |
+| GET | `/public/info` | no | 200 | — |
+| GET | `/protected/profile` | Bearer | 200 (id, email, created_at) | 401 |
+| GET | `/protected/dashboard` | Bearer | 200 | 401 |
+| GET | `/tasks` | no | 200 | — |
+| GET | `/tasks/{id}` | no | 200 | 404 |
+| POST | `/tasks` | no | 201 | 400 |
+| PUT | `/tasks/{id}` | no | 200 | 400, 404 |
+| DELETE | `/tasks/{id}` | no | 204 | 404 |
 
-| Method | Path                        | Does                          |
-| ------ | --------------------------- | ----------------------------- |
-| GET    | `/tasks?done=true`          | Filter                        |
-| GET    | `/tasks?search=milk`        | Case-insensitive title search |
-| GET    | `/tasks?limit=2&offset=1`   | Pagination                    |
-| GET    | `/stats`                    | `{total, done, open}`         |
-| POST   | `/reset`                    | Restore the three examples    |
+Missing/malformed Bearer → `401 {"error":"Access token required"}`.  
+Bad or expired JWT → `401 {"error":"Invalid or expired token"}`.  
+Wrong password → `401 {"error":"Invalid login credentials"}`.
 
-![Swagger UI listing every endpoint](docs/swagger-ui.png)
+Token checks live in one FastAPI dependency (`require_user` in `auth.py`).
+`/protected/profile`, `/protected/dashboard`, and `/auth/logout` all use it.
+
+![Swagger UI with Bearer auth](docs/swagger-ui.png)
+
+## Postgres (optional)
+
+Task rows can live in Postgres via Docker. `python check.py` uses the
+in-memory repository and does not need Docker.
+
+```bash
+docker compose up --build
+```
+
+`DATABASE_URL` and `POSTGRES_*` are in `.env.example`. Data is on the `pgdata`
+volume, so `docker compose restart` keeps rows.
